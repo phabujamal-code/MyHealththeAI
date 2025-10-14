@@ -1,49 +1,65 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import os
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
-# === 1. دالة البدء /start ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await update.message.reply_text(
-        f"👋 أهلاً {user.first_name}!\n"
-        "أنا MyHealth AI 🤖\n"
-        "مساعدك الذكي للصحة والعادات اليومية.\n\n"
-        "اكتب /tip للحصول على نصيحة صحية اليوم!"
-    )
-
-# === 2. دالة النصائح اليومية ===
-async def tip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tips = [
-        "🥦 تناول الخضروات يوميًا — فهي غنية بالعناصر المضادة للأكسدة.",
-        "💧 اشرب 8 أكواب من الماء على الأقل كل يوم!",
-        "😴 حاول النوم من 7 إلى 8 ساعات للحفاظ على نشاطك الذهني.",
-        "🚶‍♂️ مارس رياضة خفيفة مثل المشي 30 دقيقة يوميًا.",
-        "🧘 خذ وقتًا للاسترخاء والتأمل — صحتك النفسية مهمة أيضًا!"
-    ]
-    import random
-    tip_of_the_day = random.choice(tips)
-    await update.message.reply_text(f"✨ نصيحة اليوم:\n{tip_of_the_day}")
-
-# === 3. دالة استجابة للرسائل العامة ===
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
-    if "شكرا" in text or "thank" in text:
-        await update.message.reply_text("على الرحب 🤍! تذكر أن الصحة تبدأ بخطوة صغيرة.")
-    else:
-        await update.message.reply_text("اكتب /tip للحصول على نصيحة جديدة 🌿")
-
-# === 4. تشغيل البوت ===
+# -------------------------------
+# 1️⃣ استدعاء التوكن من إعدادات Render
+# -------------------------------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-if not TOKEN:
-    print("⚠️ لم يتم العثور على التوكن! تأكد من إضافته في Render → Environment Variables")
-else:
+# -------------------------------
+# 2️⃣ دالة الترحيب عند بدء البوت
+# -------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 أهلاً بك في بوت GrowMind AI!\n\n"
+        "هذا البوت يقدم لك نصيحة تحفيزية يومية لتحسين حياتك ورفع إنتاجيتك.\n"
+        "اكتب /tip للحصول على أول نصيحة اليوم 💡"
+    )
+
+# -------------------------------
+# 3️⃣ دالة النصائح اليومية
+# -------------------------------
+async def tip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tips = [
+        "✨ ركّز على هدف واحد فقط اليوم وستحقق أكثر مما تتخيل.",
+        "🧘‍♂️ لا تبدأ يومك بالهاتف، خذ 10 دقائق للتنفس والتخطيط.",
+        "💪 المثابرة أهم من الذكاء. افعل القليل كل يوم.",
+        "📖 اقرأ صفحة واحدة يومياً، خلال سنة ستنهي عشرات الكتب.",
+        "🚀 كل نجاح يبدأ بخطوة صغيرة، لا تنتظر المثالية.",
+    ]
+    import random
+    message = random.choice(tips)
+    await update.message.reply_text(message)
+
+# -------------------------------
+# 4️⃣ دالة الردود العامة (لكل رسالة عادية)
+# -------------------------------
+async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text.lower()
+    if "شكراً" in user_message or "thank" in user_message:
+        await update.message.reply_text("العفو 🙏 استمر بالتقدم!")
+    else:
+        await update.message.reply_text("اكتب /tip للحصول على نصيحة جديدة 🌟")
+
+# -------------------------------
+# 5️⃣ تشغيل البوت
+# -------------------------------
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tip", tip))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply))
 
-    print("🚀 MyHealth AI Bot is running...")
+    print("🚀 Bot is running...")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
