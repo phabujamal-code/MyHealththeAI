@@ -29,14 +29,15 @@ db = TinyDB('db.json')
 users_tbl = db.table('users')
 logs_tbl = db.table('logs')
 
+# load tips from file if exists
 try:
     with open('tips.json', 'r', encoding='utf-8') as f:
         GENERAL_TIPS = json.load(f)
 except:
     GENERAL_TIPS = [
-        "ابدأ يومك بكوب ماء قبل أي شيء.",
-        "اقرأ 10 صفحات من كتاب تحبه.",
-        "امشِ 10 دقائق بعد الظهر لزيادة نشاطك."
+      "ابدأ يومك بكوب ماء قبل أي شيء.",
+      "اقرأ 10 صفحات من كتاب تحبه.",
+      "امشِ 10 دقائق بعد الظهر لزيادة نشاطك."
     ]
 
 scheduler = BackgroundScheduler()
@@ -77,14 +78,22 @@ def t(user_id, key):
     q = Query()
     user = users_tbl.get(q.user_id == user_id)
     lang = user.get("lang") if user else "ar"
-    if lang not in translations: lang = "ar"
+    if lang not in translations:
+        lang = "ar"
     return translations[lang].get(key, key)
 
 def get_user(user_id):
     q = Query()
     res = users_tbl.get(q.user_id == user_id)
     if not res:
-        users_tbl.insert({"user_id": user_id, "daily": False, "time": "09:00", "subscribed": False, "lang": "ar", "join_date": datetime.utcnow().isoformat()})
+        users_tbl.insert({
+            "user_id": user_id,
+            "daily": False,
+            "time": "09:00",
+            "subscribed": False,
+            "lang": "ar",
+            "join_date": datetime.utcnow().isoformat()
+        })
         res = users_tbl.get(q.user_id == user_id)
     return res
 
@@ -92,25 +101,29 @@ def update_user(user_id, data: dict):
     q = Query()
     users_tbl.update(data, q.user_id == user_id)
 
-def schedule_daily_for(user_id, chat_id, time_str, context: ContextTypes.DEFAULT_TYPE):
+def schedule_daily_for(user_id, chat_id, time_str, app):
     hour, minute = map(int, time_str.split(":"))
     job_id = f"daily_{user_id}"
     if scheduler.get_job(job_id):
         scheduler.remove_job(job_id)
-    scheduler.add_job(lambda: asyncio.run(send_daily_prompt(chat_id, context, user_id)), 'cron', id=job_id, hour=hour, minute=minute)
+
+    # schedule async job using run_coroutine_threadsafe
+    def job_func():
+        asyncio.run_coroutine_threadsafe(send_daily_prompt(chat_id, app, user_id), app.loop)
+
+    scheduler.add_job(job_func, 'cron', id=job_id, hour=hour, minute=minute)
     logger.info(f"Scheduled {job_id} at {time_str}")
 
-async def send_daily_prompt(chat_id, context: ContextTypes.DEFAULT_TYPE, user_id):
+async def send_daily_prompt(chat_id, app, user_id):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("شرب ماء ✅", callback_data="log_water"),
          InlineKeyboardButton("تمرين ✅", callback_data="log_exercise")],
         [InlineKeyboardButton("نوم جيد ✅", callback_data="log_sleep"),
          InlineKeyboardButton("مشاركة المزاج 😊", callback_data="log_mood")]
     ])
-    await context.bot.send_message(chat_id=chat_id, text=t(user_id,"welcome"), reply_markup=kb)
+    await app.bot.send_message(chat_id=chat_id, text=t(user_id,"welcome"), reply_markup=kb)
 
-# Handlers (async)
-
+# handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_user(user.id)
@@ -122,24 +135,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
     chat_id = query.message.chat_id
     data = query.data
 
     if data == "daily_on":
         update_user(user_id, {"daily": True, "time": "09:00"})
-        schedule_daily_for(user_id, chat_id, "09:00", context)
+        schedule_daily_for(user_id, chat_id, "09:00", context.application)
+        await query.answer()
         await query.edit_message_text(t(user_id,"reminder_on") + " 09:00")
     elif data == "daily_off":
         update_user(user_id, {"daily": False})
         job_id = f"daily_{user_id}"
         if scheduler.get_job(job_id):
             scheduler.remove_job(job_id)
+        await query.answer()
         await query.edit_message_text(t(user_id,"reminder_off"))
     elif data.startswith("log_"):
         habit = data.split("_",1)[1]
         logs_tbl.insert({"user_id": user_id, "date": datetime.utcnow().isoformat(), "habit": habit, "value": 1})
+        await query.answer("تم التسجيل — أحسنت!")
         await query.edit_message_text("تم تسجيل: " + habit.replace("-", " "))
     elif data == "change_lang":
         kb = InlineKeyboardMarkup([
@@ -147,10 +162,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("English 🇬🇧", callback_data="setlang_en")],
             [InlineKeyboardButton("עברית 🇮🇱", callback_data="setlang_he")]
         ])
+        await query.answer()
         await query.edit_message_text(t(user_id,"choose_language"), reply_markup=kb)
     elif data.startswith("setlang_"):
         lang = data.split("_",1)[1]
         update_user(user_id, {"lang": lang})
+        await query.answer()
         await query.edit_message_text(translations[lang]["language_set"])
 
 async def tip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,7 +206,7 @@ async def time_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             time_str = f"{hour:02d}:{minute:02d}"
             update_user(user.id, {"time": time_str, "daily": True})
-            schedule_daily_for(user.id, update.message.chat_id, time_str, context)
+            schedule_daily_for(user.id, update.message.chat_id, time_str, context.application)
             await update.message.reply_text(f"{t(user.id,'reminder_on')} {time_str}")
         else:
             await update.message.reply_text("صيغة الوقت غير صحيحة.")
@@ -207,7 +224,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counts = {}
     for r in logs:
         counts[r['habit']] = counts.get(r['habit'],0) + 1
-    lines = [f"- {habit}: {cnt} مرة في آخر 7 أيام" for habit, cnt in counts.items()]
+    lines = []
+    for habit, cnt in counts.items():
+        lines.append(f"- {habit}: {cnt} مرة في آخر 7 أيام")
     advice = personalized_tip(user.id)
     msg = t(user.id,"report_intro") + "\n" + "\n".join(lines) + "\n\nنصيحة: " + advice
     await update.message.reply_text(msg)
@@ -222,26 +241,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "/start - البداية\n/tip - نصيحة\n/report - تقرير الأسبوع\n/set_time - تحديد وقت\n/status - الحالة"
     await update.message.reply_text(text)
 
-# Main
 async def main():
     if not TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not set.")
+        logger.error("TELEGRAM_BOT_TOKEN not set. ضع المتغير في Render أو بيئتك")
         return
-
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(CommandHandler("tip", tip_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("set_time", set_time))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_manual))
     app.add_handler(MessageHandler(filters.Regex(r'^\d{1,2}:\d{2}$'), time_text_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_manual))
 
-    logger.info("Bot started")
     await app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    import asyncio
     asyncio.run(main())
