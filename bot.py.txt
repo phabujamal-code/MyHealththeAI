@@ -1,0 +1,247 @@
+# bot.py
+import os
+import logging
+import random
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackContext, CallbackQueryHandler, MessageHandler, Filters
+from apscheduler.schedulers.background import BackgroundScheduler
+from tinydb import TinyDB, Query
+import json
+
+# logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN not set. ضع متغير البيئة TELEGRAM_BOT_TOKEN")
+    # لا نختم لأن Render سيعطيه. لو تعمل محلي ضع التوكن في env.
+
+# db
+db = TinyDB('db.json')
+users_tbl = db.table('users')
+logs_tbl = db.table('logs')
+
+# load tips from file if exists
+try:
+    with open('tips.json', 'r', encoding='utf-8') as f:
+        GENERAL_TIPS = json.load(f)
+except:
+    GENERAL_TIPS = [
+      "ابدأ يومك بكوب ماء قبل أي شيء.",
+      "اقرأ 10 صفحات من كتاب تحبه.",
+      "امشِ 10 دقائق بعد الظهر لزيادة نشاطك."
+    ]
+
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+# translations
+translations = {
+    "ar": {
+        "welcome": "مرحبًا 👋 أنا MyHealth AI — مساعدك اليومي للصحة والعادات.",
+        "tip_intro": "✨ نصيحة لك:",
+        "report_intro": "تقرير الأسبوع:",
+        "choose_language": "اختر لغتك المفضلة:",
+        "language_set": "تم تغيير اللغة إلى العربية 🇸🇦",
+        "reminder_on": "تم تفعيل التذكير اليومي الساعة",
+        "reminder_off": "تم إيقاف التذكير اليومي."
+    },
+    "en": {
+        "welcome": "Hi 👋 I'm MyHealth AI — your daily health & habits assistant.",
+        "tip_intro": "✨ Today's tip:",
+        "report_intro": "Weekly report:",
+        "choose_language": "Choose your preferred language:",
+        "language_set": "Language changed to English 🇬🇧",
+        "reminder_on": "Daily reminder set at",
+        "reminder_off": "Daily reminder turned off."
+    },
+    "he": {
+        "welcome": "היי 👋 אני MyHealth AI — העוזר היומי שלך לבריאות והרגלים.",
+        "tip_intro": "✨ טיפ היום:",
+        "report_intro": "דוח שבועי:",
+        "choose_language": "בחר את שפתך המועדפת:",
+        "language_set": "השפה שונתה לעברית 🇮🇱",
+        "reminder_on": "התזכורת היומית הופעלה ב",
+        "reminder_off": "התזכורת היומית בוטלה."
+    }
+}
+
+def t(user_id, key):
+    q = Query()
+    user = users_tbl.get(q.user_id == user_id)
+    lang = user.get("lang") if user else "ar"
+    if lang not in translations: lang = "ar"
+    return translations[lang].get(key, key)
+
+def get_user(user_id):
+    q = Query()
+    res = users_tbl.get(q.user_id == user_id)
+    if not res:
+        users_tbl.insert({"user_id": user_id, "daily": False, "time": "09:00", "subscribed": False, "lang": "ar", "join_date": datetime.utcnow().isoformat()})
+        res = users_tbl.get(q.user_id == user_id)
+    return res
+
+def update_user(user_id, data: dict):
+    q = Query()
+    users_tbl.update(data, q.user_id == user_id)
+
+def schedule_daily_for(user_id, chat_id, time_str, context: CallbackContext):
+    hour, minute = map(int, time_str.split(":"))
+    job_id = f"daily_{user_id}"
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+    scheduler.add_job(send_daily_prompt, 'cron', args=[chat_id, context, user_id], id=job_id, hour=hour, minute=minute)
+    logger.info(f"Scheduled {job_id} at {time_str}")
+
+def send_daily_prompt(chat_id, context: CallbackContext, user_id):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("شرب ماء ✅", callback_data="log_water"),
+         InlineKeyboardButton("تمرين ✅", callback_data="log_exercise")],
+        [InlineKeyboardButton("نوم جيد ✅", callback_data="log_sleep"),
+         InlineKeyboardButton("مشاركة المزاج 😊", callback_data="log_mood")]
+    ])
+    context.bot.send_message(chat_id=chat_id, text=t(user_id,"welcome"), reply_markup=kb)
+
+# handlers
+def start(update: Update, context: CallbackContext):
+    user = update.effective_user
+    get_user(user.id)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("تفعيل التذكير (09:00)", callback_data="daily_on")],
+        [InlineKeyboardButton("🌐 تغيير اللغة", callback_data="change_lang")]
+    ])
+    update.message.reply_text(t(user.id,"welcome") + "\n\n" + t(user.id,"tip_intro"), reply_markup=kb)
+
+def callback_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+    data = query.data
+
+    if data == "daily_on":
+        update_user(user_id, {"daily": True, "time": "09:00"})
+        schedule_daily_for(user_id, chat_id, "09:00", context)
+        query.answer()
+        query.edit_message_text(t(user_id,"reminder_on") + " 09:00")
+    elif data == "daily_off":
+        update_user(user_id, {"daily": False})
+        job_id = f"daily_{user_id}"
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+        query.answer()
+        query.edit_message_text(t(user_id,"reminder_off"))
+    elif data.startswith("log_"):
+        habit = data.split("_",1)[1]
+        logs_tbl.insert({"user_id": user_id, "date": datetime.utcnow().isoformat(), "habit": habit, "value": 1})
+        query.answer("تم التسجيل — أحسنت!")
+        query.edit_message_text("تم تسجيل: " + habit.replace("-", " "))
+    elif data == "change_lang":
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("العربية 🇸🇦", callback_data="setlang_ar"),
+             InlineKeyboardButton("English 🇬🇧", callback_data="setlang_en")],
+            [InlineKeyboardButton("עברית 🇮🇱", callback_data="setlang_he")]
+        ])
+        query.answer()
+        query.edit_message_text(t(user_id,"choose_language"), reply_markup=kb)
+    elif data.startswith("setlang_"):
+        lang = data.split("_",1)[1]
+        update_user(user_id, {"lang": lang})
+        query.answer()
+        query.edit_message_text(translations[lang]["language_set"])
+
+def tip_command(update: Update, context: CallbackContext):
+    user = update.effective_user
+    tip = personalized_tip(user.id)
+    update.message.reply_text(f"{t(user.id,'tip_intro')}\n\n{tip}")
+
+def personalized_tip(user_id):
+    q = Query()
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    logs = logs_tbl.search((q.user_id == user_id) & (Query().date.test(lambda d: datetime.fromisoformat(d) >= week_ago)))
+    water_count = sum(1 for r in logs if r['habit']=='water')
+    if water_count < 4:
+        return "حاول شرب كوب ماء كل صباح — ضع زجاجة بجانب السرير"
+    else:
+        return random.choice(GENERAL_TIPS)
+
+def log_manual(update: Update, context: CallbackContext):
+    txt = update.message.text.lower()
+    mapping = {"ماء":"water","شرب":"water","تمرين":"exercise","نوم":"sleep","مزاج":"mood","water":"water","sleep":"sleep","exercise":"exercise","mood":"mood"}
+    for k,v in mapping.items():
+        if k in txt:
+            logs_tbl.insert({"user_id": update.effective_user.id, "date": datetime.utcnow().isoformat(), "habit": v, "value":1})
+            update.message.reply_text("✅ تم تسجيل: " + k)
+            return
+    update.message.reply_text("لم أفهم. استخدم الأزرار أو اكتب 'شرب ماء' أو 'تمرين' أو 'نوم'.")
+
+def set_time(update: Update, context: CallbackContext):
+    update.message.reply_text("أرسل الوقت بصيغة HH:MM (مثلاً 08:30) لتحديد وقت التذكير.")
+
+def time_text_handler(update: Update, context: CallbackContext):
+    user = update.effective_user
+    text = update.message.text.strip()
+    try:
+        hour, minute = map(int, text.split(":"))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            time_str = f"{hour:02d}:{minute:02d}"
+            update_user(user.id, {"time": time_str, "daily": True})
+            schedule_daily_for(user.id, update.message.chat_id, time_str, context)
+            update.message.reply_text(f"{t(user.id,'reminder_on')} {time_str}")
+        else:
+            update.message.reply_text("صيغة الوقت غير صحيحة.")
+    except:
+        update.message.reply_text("أرسل الوقت بصيغة HH:MM")
+
+def report_command(update: Update, context: CallbackContext):
+    user = update.effective_user
+    q = Query()
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    logs = logs_tbl.search((q.user_id == user.id) & (Query().date.test(lambda d: datetime.fromisoformat(d) >= week_ago)))
+    if not logs:
+        update.message.reply_text("لم تُسَجّل أي عادات خلال الأسبوع الماضي.")
+        return
+    counts = {}
+    for r in logs:
+        counts[r['habit']] = counts.get(r['habit'],0) + 1
+    lines = []
+    for habit, cnt in counts.items():
+        lines.append(f"- {habit}: {cnt} مرة في آخر 7 أيام")
+    advice = personalized_tip(user.id)
+    msg = t(user.id,"report_intro") + "\n" + "\n".join(lines) + "\n\nنصيحة: " + advice
+    update.message.reply_text(msg)
+
+def status(update: Update, context: CallbackContext):
+    user = update.effective_user
+    u = get_user(user.id)
+    daily = "مفعل" if u.get("daily") else "متوقف"
+    update.message.reply_text(f"حالتك:\nالتذكير: {daily}\nالوقت: {u.get('time')}")
+
+def help_command(update: Update, context: CallbackContext):
+    text = "/start - البداية\n/tip - نصيحة\n/report - تقرير الأسبوع\n/set_time - تحديد وقت\n/status - الحالة"
+    update.message.reply_text(text)
+
+def main():
+    if not TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not set. ضع المتغير في Render أو بيئتك")
+        return
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CallbackQueryHandler(callback_handler))
+    dp.add_handler(CommandHandler("tip", tip_command))
+    dp.add_handler(CommandHandler("report", report_command))
+    dp.add_handler(CommandHandler("set_time", set_time))
+    dp.add_handler(CommandHandler("status", status))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(MessageHandler(Filters.regex(r'^\d{1,2}:\d{2}$'), time_text_handler))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, log_manual))
+
+    updater.start_polling()
+    logger.info("Bot started")
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
